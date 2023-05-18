@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../Vitulus publish files/vitulus_mower_controll"
+		},
+		{
+			"name": "VITULUS_mower_FW",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
