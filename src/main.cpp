@@ -54,7 +54,7 @@ constexpr uint32_t steps_per_mm = 80*15;
 #define OUTPUT_MAX 255
 #define KP 0.2   // 1.7    2.7
 #define KI 0.1    // 25       5  
-#define KD 0.01  // 0.02     0.02
+#define KD 0.001  // 0.02     0.02
 #define PID_STEP_MS 8
 #define SPEED_SAMPLES 1
 
@@ -119,21 +119,21 @@ void setup() {
 
     pinMode(SWITCH_PIN, INPUT);
 
-    // if (digitalRead(SWITCH_PIN) == false)
-    // { 
-    //   // nh.loginfo("ENDSTOP PRESSED");
-    //   endstop = true;
-    //   gohome = false;
-    //   stepper.stop();
-    //   stepper.move(0*steps_per_mm);
-    //   stepper.setCurrentPosition(0);
-    //   stepper.disableOutputs();
-    //   stepper.moveTo(1*steps_per_mm); // Move 100mm
-    //   stepper.enableOutputs();
-    //   switchstate = false;
-    // }else{
-    //   switchstate = true;
-    // }
+    if (digitalRead(SWITCH_PIN) == false)
+    { 
+      // nh.loginfo("ENDSTOP PRESSED");
+      endstop = true;
+      gohome = false;
+      stepper.stop();
+      stepper.move(0*steps_per_mm);
+      stepper.setCurrentPosition(0);
+      stepper.disableOutputs();
+      stepper.moveTo(1*steps_per_mm); // Move 100mm
+      stepper.enableOutputs();
+      switchstate = false;
+    }else{
+      switchstate = true;
+    }
 
 
 }
@@ -184,47 +184,47 @@ void loop() {
 
 
   // STEPPER
-  // if (digitalRead(SWITCH_PIN) == false)
-  //   {
-  //     //  On change endswitch pressed
-  //     if (switchstate == true){
-  //       // nh.loginfo("ENDSTOP PRESSED");
-  //       // If endswitch reached, make a jump out from endswitch
-  //       endstop = true;
-  //       gohome = false;
-  //       stepper.stop();
-  //       stepper.move(0*steps_per_mm);
-  //       stepper.setCurrentPosition(0);
-  //       // stepper.disableOutputs();
-  //       stepper.moveTo(1*steps_per_mm); // Move 1 mm
-  //       // stepper.enableOutputs();
-  //     }
-  //     switchstate = false;
-  //   }else{
-  //     //  On change endswitch released
-  //     if (switchstate == false){
-  //       // nh.loginfo("ENDSTOP RELEASED");
-  //     }
-  //     switchstate = true;
-  //   }
+  if (digitalRead(SWITCH_PIN) == false)
+    {
+      //  On change endswitch pressed
+      if (switchstate == true){
+        // nh.loginfo("ENDSTOP PRESSED");
+        // If endswitch reached, make a jump out from endswitch
+        endstop = true;
+        gohome = false;
+        stepper.stop();
+        stepper.move(0*steps_per_mm);
+        stepper.setCurrentPosition(0);
+        // stepper.disableOutputs();
+        stepper.moveTo(1*steps_per_mm); // Move 1 mm
+        // stepper.enableOutputs();
+      }
+      switchstate = false;
+    }else{
+      //  On change endswitch released
+      if (switchstate == false){
+        // nh.loginfo("ENDSTOP RELEASED");
+      }
+      switchstate = true;
+    }
     
-  //   // Try to reach endswitch 
-  //   if (gohome == true){
-  //     stepper.moveTo(-100*steps_per_mm); // Move 100mm
-  //     stepper.enableOutputs();
-  //   }
+    // Try to reach endswitch 
+    if (gohome == true){
+      stepper.moveTo(-100*steps_per_mm); // Move 100mm
+      stepper.enableOutputs();
+    }
     
-  //   // If stepper reach the possition
-  //   if (stepper.distanceToGo() == 0) {
-  //       stepper.disableOutputs();
-  //       // Set initial position if jump out from endswitch was done.
-  //       if (endstop == true){
-  //         endstop = false;
-  //         stepper.setCurrentPosition(0);
-  //       }
-  //   }
+    // If stepper reach the possition
+    if (stepper.distanceToGo() == 0) {
+        stepper.disableOutputs();
+        // Set initial position if jump out from endswitch was done.
+        if (endstop == true){
+          endstop = false;
+          stepper.setCurrentPosition(0);
+        }
+    }
     
-  //   stepper.run();
+    stepper.run();
     
   nh.spinOnce();
 }
