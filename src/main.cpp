@@ -1,39 +1,50 @@
 #include <Arduino.h>
 #include <TMC2130Stepper.h>
 #include <AccelStepper.h>
-#include <AutoPID.h>
-#include <ros.h>
-#include <std_msgs/Int32.h>
+#include <PID_v1.h>
+#include <TMC2130Stepper_REGDEFS.h>
+#include <EEPROM.h>
 
 
-ros::NodeHandle  nh;
 
-std_msgs::Int32 rpm_msg;
-ros::Publisher mower_rpm("mower_rpm", &rpm_msg);
-
-std_msgs::Int32 motor_on_msg;
-ros::Publisher mower_motor_on("mower_motor_on", &motor_on_msg);
-
-std_msgs::Int32 height_msg;
-ros::Publisher mower_cut_height("mower_cut_height", &height_msg);
-//
-//std_msgs::Int32 mower_msg;
-//ros::Publisher mower_message("mower_message", &mower_msg);
-
-
-bool endstop = false;
-bool gohome = true;
-bool switchstate = true;
-int  motor_on = 0;
 int  cut_height = 0;
+int height = 0;
+// Stepper
+bool run_calib = false;
+bool run_calib_last = false;
+bool run_calib_stop = false;
+bool run_calib_up = false;
+bool run_calib_down = false;
+int max_height = 65;
+bool gohome = true;
+bool gohome_last = false;
+bool goposition = false;
+bool goposition_last = false;
+int position_target = 0;
+
+// for serial
+#define CMD_LENGTH 4
+#define VAL_LENGTH 4
+String command = "NONE";
+String cmdval = "0000";
 
 
 #define PWM_R 5
 #define PWM_L 6
+int  motor_on = 0;
+int  motor_on_last = 0;
+bool motor_direction = true;  // true=right, false=left
+bool motor_direction_change = false;  // if motor direction change event trigered
+bool motor_direction_change_req = true;  // true=right, false=left motor direction change request
+bool motor_error = 0;
 double countb = 0;
 double count;
+double count_last = 0;
 unsigned long lastmillis;
+unsigned long lastmillis_stepper_report;
+unsigned long lastmillis_blocked_motor;
 unsigned long lastmillisloop;
+unsigned long lastmillisSpeed;
 double outputVal, setPoint;
 double speedSampleBuffer = 0;
 int speedSampleBufferCounter = 0;
@@ -48,209 +59,565 @@ int speedSampleBufferRosCounter = 0;
 #define MOSI_PIN  11
 #define MISO_PIN 12
 #define SCK_PIN  13
-constexpr uint32_t steps_per_mm = 80*15;
+// constexpr uint32_t steps_per_mm = 80*15*2;  // 8 microsteps
+constexpr uint32_t steps_per_mm = 80*15;     // 4 microsteps
 
 #define OUTPUT_MIN 0
 #define OUTPUT_MAX 255
-#define KP 0.2   // 1.7    2.7
-#define KI 0.1    // 25       5  
-#define KD 0.001  // 0.02     0.02
-#define PID_STEP_MS 8
+#define KP 0.0000005   // 1.7    2.7     0.03
+#define KI 3.0    // 25       5     0.6
+#define KD 0.0000000005  // 0.02     0.02     60   0.000005
+#define KD 0.0000000000005  // 0.02     0.02     60   0.000005
+#define PID_STEP_MS 4
 #define SPEED_SAMPLES 1
+// double kp = KP;
+// double ki = KI;
+// double kd = KD;
 
-#define INTERVAL 5.0
+#define INTERVAL 4.0
 
-unsigned long rpm = 1500;
+unsigned long rpm = 60;
 #define PPR 256.0
 #define MS  (60000.0/INTERVAL) // 60 000 - minute in ms
 
 #define SWITCH_PIN  3
 
 void prerusenib();
+void calibration();
+void go_home();
+void go_position();
+
+//////////////////// EEPROM  addr and init check
+int8_t check_eeprom = 0;
+int check_eeprom_addr = 0; 
+int max_height_addr = sizeof(int8_t);
 
 TMC2130Stepper driver = TMC2130Stepper(EN_PIN, DIR_PIN, STEP_PIN, CS_PIN);
 AccelStepper stepper = AccelStepper(stepper.DRIVER, STEP_PIN, DIR_PIN);
 
-AutoPID myPID(&count, &setPoint, &outputVal, OUTPUT_MIN, OUTPUT_MAX, KP, KI, KD);
+PID myPID(&count, &outputVal, &setPoint, KP, KI, KD, DIRECT);
 
-void setMotor( const std_msgs::Int32& set_motor_msg);
-void setRpm( const std_msgs::Int32& set_rpm_msg);
-void setHeight( const std_msgs::Int32& set_height_msg);
-ros::Subscriber<std_msgs::Int32> sub_motor("mower_set_motor", setMotor );
-ros::Subscriber<std_msgs::Int32> sub_rpm("mower_set_rpm", setRpm );
-ros::Subscriber<std_msgs::Int32> sub_height("mower_set_height", setHeight );
 
+
+
+
+/*** 
+ * 
+ * ToDo:
+ * 
+ * Vypnout pri zablokovanem motoru. STATUS E-Error
+ * Hotovo, ale proverit
+ * 
+ * 
+ ***/
+
+int sg_result;
+int sg_result_last;
+int cs_actual;
+unsigned long interval_stall = 200;
+
+
+
+bool vsense;
+// #define STALL_VALUE -20 // [-64..63] 8 microsteps
+#define STALL_VALUE -59 // [-64..63] 4 microsteps
+
+uint16_t rms_current(uint8_t CS, float Rsense = 0.11) {
+  return (float)(CS+1)/32.0 * (vsense?0.180:0.325)/(Rsense+0.02) / 1.41421 * 1000;
+}
 
 void setup() {
-
-    nh.initNode();
-    nh.advertise(mower_rpm);
-    nh.advertise(mower_motor_on);
-    nh.advertise(mower_cut_height);
-//    nh.advertise(mower_message);
-    nh.subscribe(sub_motor);
-    nh.subscribe(sub_rpm);
-    nh.subscribe(sub_height);
+  // EEPROM First run check
+  if (EEPROM.get(check_eeprom_addr, check_eeprom) != 1)
+  { // first run
+    check_eeprom = 1;
+    EEPROM.put(check_eeprom_addr, check_eeprom);
+    EEPROM.put(max_height_addr, max_height);
+      }
+  else
+  { // read stored values
+    EEPROM.get(max_height_addr, max_height);
+  }
     
-    SPI.begin();
-    Serial.begin(115200);
-    pinMode(CS_PIN, OUTPUT);
-    digitalWrite(CS_PIN, HIGH);
-    driver.begin();             
-    driver.rms_current(600);    
-    driver.stealthChop(0);   
-    driver.stealth_autoscale(1);
-    driver.microsteps(4);
+  SPI.begin();
+  Serial.begin(500000);
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);
+  driver.begin(); 
+  driver.push();
+  driver.toff(3);
+  driver.tbl(1);
+  driver.hysteresis_start(4);
+  driver.hysteresis_end(-2);
+  driver.rms_current(600); // mA
+  driver.microsteps(4);
+  driver.diag1_stall(1);
+  driver.diag1_active_high(1);
+  driver.coolstep_min_speed(0xFFFFF); // 20bit max
+  driver.THIGH(0);
+  driver.semin(5);
+  driver.semax(2);
+  driver.sedn(0b01);
+  driver.sg_stall_value(STALL_VALUE);
+  driver.stealth_autoscale(1);
+  // driver.SilentStepStick2130(600); // Set stepper current to 600mA
+  driver.stealthChop(1); // Enable extremely quiet stepping
+  driver.interpolate(1);
+  driver.shaft_dir(1);
 
-    stepper.setMaxSpeed(50*steps_per_mm); // 100mm/s @ 80 steps/mm
-    stepper.setAcceleration(100*steps_per_mm); // 2000mm/s^2
-    stepper.setEnablePin(EN_PIN);
-    stepper.setPinsInverted(false, false, true);
-    
-    pinMode(PWM_R, OUTPUT);
-    pinMode(PWM_L, OUTPUT);
-    analogWrite(PWM_R, 0);
-    analogWrite(PWM_L, 0);
-    setPoint = double(rpm); //205-3000rpm 4096
-    // setPoint = double(rpm*PPR/MS); //205-3000rpm 4096
-    attachInterrupt(0, prerusenib, RISING);
-    lastmillis = millis();
-    myPID.setTimeStep(PID_STEP_MS);
-
-    pinMode(SWITCH_PIN, INPUT);
-
-    if (digitalRead(SWITCH_PIN) == false)
-    { 
-      // nh.loginfo("ENDSTOP PRESSED");
-      endstop = true;
-      gohome = false;
-      stepper.stop();
-      stepper.move(0*steps_per_mm);
-      stepper.setCurrentPosition(0);
-      stepper.disableOutputs();
-      stepper.moveTo(1*steps_per_mm); // Move 100mm
-      stepper.enableOutputs();
-      switchstate = false;
-    }else{
-      switchstate = true;
-    }
-
+  stepper.setMaxSpeed(3500); // 100mm/s @ 80 steps/mm
+  stepper.setAcceleration(5*steps_per_mm); // 2000mm/s^2
+  stepper.setEnablePin(EN_PIN);
+  stepper.setPinsInverted(false, false, true);
+  
+  pinMode(PWM_R, OUTPUT);
+  pinMode(PWM_L, OUTPUT);
+  analogWrite(PWM_R, 0);
+  analogWrite(PWM_L, 0);
+  setPoint = double(rpm); //205-3000rpm 4096
+  attachInterrupt(0, prerusenib, RISING);
+  lastmillis = millis();
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetSampleTime(4);
+  pinMode(SWITCH_PIN, INPUT);
 
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void loop() {
-  // PUBLISH TOPICS
-  if ((millis() - lastmillis) >= 1000){
-    rpm_msg.data = int(speedSampleBufferRos/speedSampleBufferRosCounter);
-    // rpm_msg.data = (count);
-    // rpm_msg.data = (count/PPR*MS);
-    mower_rpm.publish( &rpm_msg );
-    speedSampleBufferRos = 0;
-    speedSampleBufferRosCounter = 0;
-    motor_on_msg.data = motor_on;
-    mower_motor_on.publish( &motor_on_msg );
-    height_msg.data = (stepper.currentPosition()/steps_per_mm);
-    mower_cut_height.publish( &height_msg );
-    lastmillis = millis();
-  }
-
-  // PID MOWER MOTOR
-  if ((millis() - lastmillisloop) >= INTERVAL){
-    lastmillisloop = millis();
-    // count = countb;
-    speedSampleBuffer = speedSampleBuffer + countb/PPR*MS;
-    speedSampleBufferCounter ++;
-    speedSampleBufferRos = speedSampleBufferRos + countb/PPR*MS;
-    speedSampleBufferRosCounter ++;
-    countb = 0;
-    if (speedSampleBufferCounter == SPEED_SAMPLES){
-      count = speedSampleBuffer/speedSampleBufferCounter;
-      speedSampleBuffer = 0;
-      speedSampleBufferCounter = 0;
-    }
-
-    // char buffer[10];
-    // sprintf(buffer, "c:%d", (int)count, (int)(count * 100) % 100);
-    // nh.loginfo(buffer);
-  }
-  if (motor_on){
-    myPID.run(); // Run PID computation
-    analogWrite(PWM_L, int(outputVal));
-  }else{
-    myPID.stop();
+  if (run_calib){
+    calibration();
+    run_calib_last = run_calib;
+    gohome = false;
+    goposition = false;
+    // mower motor off
+    motor_on = false;
     analogWrite(PWM_L, 0);
+    analogWrite(PWM_R, 0);
+  }else{
+    if (gohome){
+      go_home();
+      gohome_last = gohome;
+      run_calib = false;
+      goposition = false;
+      // mower motor off
+      motor_on = false;
+      analogWrite(PWM_L, 0);
+      analogWrite(PWM_R, 0);
+    }else{
+      if (goposition){
+        go_position();
+        goposition_last = goposition;
+        run_calib = false;
+        gohome = false;
+        // mower motor off
+        motor_on = false;
+        analogWrite(PWM_L, 0);
+        analogWrite(PWM_R, 0);
+      }else{
+        // Everything except stepper operations run here.
+
+
+        // PUBLISH DATA TO SERIAL
+        if ((millis() - lastmillis) >= 1000){
+          // Serial.print(sg_result);
+          Serial.print("MAXH|");
+          Serial.println(max_height);
+          Serial.print("CUTH|");
+          Serial.println(int(stepper.currentPosition()/steps_per_mm));
+          lastmillis = millis();
+          Serial.print("MRPM|");
+          Serial.println(int(speedSampleBufferRos/speedSampleBufferRosCounter));
+          speedSampleBufferRos = 0;
+          speedSampleBufferRosCounter = 0;
+          Serial.print("MDIR|");
+          Serial.println(int(motor_direction));
+          Serial.print("SRPM|");
+          Serial.println(int(setPoint));
+        }
+
+
+        // PID MOWER MOTOR
+        if ((millis() - lastmillisloop) >= INTERVAL){
+          lastmillisloop = millis();
+          // RPM from int
+          speedSampleBuffer = speedSampleBuffer + countb/PPR*MS;
+          speedSampleBufferCounter ++;
+          speedSampleBufferRos = speedSampleBufferRos + countb/PPR*MS;
+          speedSampleBufferRosCounter ++;
+          countb = 0;
+          if (speedSampleBufferCounter == SPEED_SAMPLES){
+            count = speedSampleBuffer/speedSampleBufferCounter;
+            speedSampleBuffer = 0;
+            speedSampleBufferCounter = 0;
+          }
+        }
+
+        // if change direction request and motor speed is 0, change direction
+        if (motor_direction_change && (int(speedSampleBufferRos/speedSampleBufferRosCounter) == 0)){
+          motor_direction = motor_direction_change_req;
+          motor_on = motor_on_last;
+          motor_direction_change = false;
+        }
+
+        if (motor_on){
+          myPID.Compute();
+          if (motor_direction == 1){
+            analogWrite(PWM_R, int(outputVal));
+          }else{
+            analogWrite(PWM_L, int(outputVal));
+          }  
+        }else{
+          // myPID.stop();
+          analogWrite(PWM_L, 0);
+          analogWrite(PWM_R, 0);
+          outputVal = 0;
+        }
+
+
+        // SEND SHORT STATUS MESSAGE ONLY - R-motor run, W-wait, E-motor error, P-going to position, H-going home, C-calibrating
+        if ((millis() - lastmillis_stepper_report) >= 1000){ 
+          if (motor_error == false){
+            if (motor_on){
+              Serial.println("S|R");
+            }else{
+              Serial.println("S|W");
+            }
+          }else{
+            Serial.println("S|E");
+          }
+          
+          lastmillis_stepper_report = millis();
+        }
+
+
+      } // go on the position else end
+    } // gohome else end
+  } // Calibration else end
+
+  // Everything here run all the time  //////////////////////////////////////////
+
+
+  // Blocked motor emergency off
+  if ((millis() - lastmillis_blocked_motor) >= 500){
+    lastmillis_blocked_motor = millis();
+    if (int(outputVal) > 0 && (count + count_last) == 0){
+      motor_error = true; 
+      motor_on = false;
+      analogWrite(PWM_L, 0);
+      analogWrite(PWM_R, 0);     
+    }
+    count_last = count;
   }
 
 
-  // STEPPER
-  if (digitalRead(SWITCH_PIN) == false)
+  // Serial reading of commands and values 4 chr and 4 nr( template MOTO0001  - MOTO = CMD, 0001 = VALUE )
+  while (Serial.available() > 0) {
+    static String commandtmp;
+    static String valuetmp;
+    static unsigned int pos = 0;
+    // read the incoming byte:
+    char incomingByte = Serial.read();
+    // Serial.println(incomingByte);
+    if ( pos < CMD_LENGTH)
     {
-      //  On change endswitch pressed
-      if (switchstate == true){
-        // nh.loginfo("ENDSTOP PRESSED");
-        // If endswitch reached, make a jump out from endswitch
-        endstop = true;
-        gohome = false;
-        stepper.stop();
-        stepper.move(0*steps_per_mm);
-        stepper.setCurrentPosition(0);
-        // stepper.disableOutputs();
-        stepper.moveTo(1*steps_per_mm); // Move 1 mm
-        // stepper.enableOutputs();
-      }
-      switchstate = false;
-    }else{
-      //  On change endswitch released
-      if (switchstate == false){
-        // nh.loginfo("ENDSTOP RELEASED");
-      }
-      switchstate = true;
+      commandtmp += incomingByte;
     }
-    
-    // Try to reach endswitch 
-    if (gohome == true){
-      stepper.moveTo(-100*steps_per_mm); // Move 100mm
+    if ((pos >= CMD_LENGTH) && (pos < (VAL_LENGTH + CMD_LENGTH)))
+    {
+      // Value add //
+      valuetmp += incomingByte;
+    }
+    pos++;
+    if (incomingByte == '\n'){ 
+      command = commandtmp;
+      cmdval = valuetmp;
+      // exec the command from serial  ////////////////////////////////////////////////////////////////////
+      // Set mower cut height ---
+      if (command == "CUTH"){
+        if (cmdval.toInt() <= max_height && cmdval.toInt() >= 20) // Check limit values min/max
+        {
+          position_target = cmdval.toInt();
+          goposition = true;
+        }
+        else
+        {
+          Serial.println("LOG|Requested value is out of the 20 - max. height interval");
+        }
+      }
+      // Set go to home position ---
+      if (command == "HOME"){
+        if (cmdval.toInt() == 1) // Check limit values min/max
+        {
+          gohome = true;
+        }
+      }
+      // Set calibration top and bottom position ---
+      if (command == "CALI"){
+        if (cmdval.toInt() == 1) // Check limit values min/max
+        {
+          run_calib = true;
+        }
+      }
+      // Set mower motor on/off ---
+      if (command == "MOTO"){
+        if (cmdval.toInt() == 1) // Check limit values min/max
+        {
+          motor_on = true;
+          motor_error = false; 
+        }else{
+          motor_on = false;
+        }
+      }
+      // Set mower motor rpm ---
+      if (command == "MRPM"){
+        if (cmdval.toInt() >= 1 && cmdval.toInt() <= 4000) // Check limit values min/max
+        {
+          setPoint = cmdval.toInt();
+        }
+        else
+        {
+          Serial.println("LOG|Requested value is out of the 1-4000 rpm.");
+        }
+      }
+      // Set mower motor direction ---
+      if (command == "MDIR"){
+        if (cmdval.toInt() == 1) // Change to right
+        { 
+          if (motor_direction != true){                  // if not right dir yet
+            motor_direction_change = true;               // require to change direction (stop first)
+            motor_direction_change_req = cmdval.toInt(); // direction requert to right
+            motor_on_last = motor_on;                    // save current state
+            motor_on = false;                            // stop motor
+          }
+        }
+        if (cmdval.toInt() == 0) // Change to left
+        { 
+          if (motor_direction != false){                 // if not left dir yet
+            motor_direction_change = true;               // require to change direction (stop first)
+            motor_direction_change_req = cmdval.toInt(); // direction requert to left
+            motor_on_last = motor_on;                    // save current state
+            motor_on = false;                            // stop motor
+          }
+        }
+      }
+      // reinit for new serial data ////////
+      pos = 0;
+      commandtmp = "";
+      valuetmp = "";
+    }
+  }
+
+  
+  stepper.run();
+  // nh.spinOnce();
+}
+
+void go_position(){
+  if (goposition){
+    //////////////////////////////////////////////// going to home position
+    if (goposition != goposition_last){
+      // Serial.println("GOING TO POSITION");
+      stepper.moveTo(position_target*steps_per_mm); // Move 100mm
       stepper.enableOutputs();
     }
-    
-    // If stepper reach the possition
     if (stepper.distanceToGo() == 0) {
-        stepper.disableOutputs();
-        // Set initial position if jump out from endswitch was done.
-        if (endstop == true){
-          endstop = false;
-          stepper.setCurrentPosition(0);
-        }
+      // Stop on the max cut height position
+      Serial.println("LOG|On required height.");
+      stepper.setSpeed(0);
+      stepper.disableOutputs();
+      goposition = false;
+      position_target = 0;
     }
-    
-    stepper.run();
-    
-  nh.spinOnce();
+    // SEND SHORT STATUS MESSAGE ONLY - R-motor run, W-wait, P-going to position, H-going home, C-calibrating
+    int cheight = int(stepper.currentPosition()/steps_per_mm);
+    if ((millis() - lastmillis_stepper_report) >= 1000){ 
+      lastmillis_stepper_report = millis();
+      Serial.println("S|P");
+      Serial.print("C|");
+      Serial.println(cheight);
+    }
+  }
+}
+
+void go_home(){
+  if (gohome){
+    //////////////////////////////////////////////// going to home position
+    if (gohome != gohome_last){
+      Serial.println("LOG|Going to home position.");
+      stepper.moveTo(100*steps_per_mm); // Move 100mm
+      stepper.enableOutputs();
+      // interval_stall = 200;  // 8 microsteps
+      interval_stall = 100;  // 4 microsteps
+      run_calib_stop = false;
+    }
+    if ((millis() - lastmillisSpeed) >= interval_stall){
+      // read current status
+      uint32_t drv_status = driver.DRV_STATUS();
+      sg_result = int((drv_status & SG_RESULT_bm)>>SG_RESULT_bp);
+      cs_actual = rms_current((drv_status & CS_ACTUAL_bm)>>CS_ACTUAL_bp);
+      // Serial.print(sg_result);
+      // Serial.print(" ");
+      // Serial.println(cs_actual);
+      if (sg_result <= 0){                         // Fine tune value for stall 
+        if (cs_actual == 1049){
+            if (sg_result_last > sg_result){
+              if (run_calib_stop == false){ 
+                // if load is too high
+                stepper.setSpeed(0);
+                Serial.println("LOG|On top position.");
+                delay(100);
+                stepper.moveTo((stepper.currentPosition() - (1*steps_per_mm))); // Small step out
+                run_calib_stop = true;
+              }
+            }  
+        }
+      }else{
+        // interval_stall = 100; // 8 microsteps
+        interval_stall = 40; // 4 microsteps
+      }
+      sg_result_last = sg_result;
+        // If stepper reach the possition
+      if (stepper.distanceToGo() == 0) {
+        // Stop on the max cut height position
+        Serial.println("LOG|On home position");
+        stepper.setSpeed(0);
+        stepper.disableOutputs();
+        stepper.setCurrentPosition(max_height*steps_per_mm); // set home position as max height
+        run_calib_up = false;
+        gohome = false;
+      }
+      lastmillisSpeed = millis();
+    } 
+    // SEND SHORT STATUS MESSAGE ONLY - R-motor run, W-wait, P-going to position, H-going home, C-calibrating
+    if ((millis() - lastmillis_stepper_report) >= 1000){ 
+      Serial.println("S|H");
+      lastmillis_stepper_report = millis();
+          }
+  }
+}
+
+void calibration(){
+  if (run_calib){ 
+    //////////////////////////////////////////////// calibration of zero position (on the ground)
+    if (run_calib != run_calib_last){
+      Serial.println("LOG|Calibration of bottom position started.");
+      stepper.moveTo(-100*steps_per_mm); // Move 100mm
+      stepper.enableOutputs();
+      // interval_stall = 200;  // 8 microsteps
+      interval_stall = 100;  // 4 microsteps
+      // run_calib_last = false;
+      run_calib_stop = false;
+      run_calib_up = false;
+      run_calib_down = true;
+    }
+    if (run_calib_down){
+      if ((millis() - lastmillisSpeed) >= interval_stall){
+        // read current status
+        uint32_t drv_status = driver.DRV_STATUS();
+        sg_result = int((drv_status & SG_RESULT_bm)>>SG_RESULT_bp);
+        cs_actual = rms_current((drv_status & CS_ACTUAL_bm)>>CS_ACTUAL_bp);
+        // Serial.print(sg_result);
+        // Serial.print(" ");
+        // Serial.println(cs_actual);
+        if (sg_result <= 0){                          // Fine tune value for stall 
+          if (cs_actual == 1049){
+              if (sg_result_last > sg_result){
+                if (run_calib_stop == false){ 
+                  // if load is too high
+                  stepper.setSpeed(0);
+                  stepper.setCurrentPosition(0);
+                  delay(100);
+                  stepper.moveTo(2*steps_per_mm); // Small step out
+                  run_calib_stop = true;
+                }
+              }  
+          }
+        }else{
+          // interval_stall = 100; // 8 microsteps
+          interval_stall = 50; // 4 microsteps
+        }
+        sg_result_last = sg_result;
+          // If stepper reach the possition
+        if (stepper.distanceToGo() == 0) {
+          // Stop on the zero position
+          Serial.println("LOG|Bottom calibration finished set as 10.");
+          stepper.setSpeed(0);
+          stepper.setCurrentPosition(10*steps_per_mm);
+          // Set initial position 
+          run_calib_down = false;
+          // Start calibration of top position
+          delay(500);
+          Serial.println("LOG|Calibration of top position started.");
+          stepper.moveTo(100*steps_per_mm); // Move 100mm
+          run_calib_up = true;
+          run_calib_stop = false;
+          // interval_stall = 200;  // 8 microsteps
+          interval_stall = 100;  // 4 microsteps
+        }
+        lastmillisSpeed = millis();
+      }
+   }
+
+
+   /////////////////////////////////// Calibration of top position
+   if (run_calib_up){
+      if ((millis() - lastmillisSpeed) >= interval_stall){
+        // read current status
+        uint32_t drv_status = driver.DRV_STATUS();
+        sg_result = int((drv_status & SG_RESULT_bm)>>SG_RESULT_bp);
+        cs_actual = rms_current((drv_status & CS_ACTUAL_bm)>>CS_ACTUAL_bp);
+        // Serial.print(sg_result);
+        // Serial.print(" ");
+        // Serial.println(cs_actual);
+        if (sg_result <= 0){                         // Fine tune value for stall 
+          if (cs_actual == 1049){
+              if (sg_result_last > sg_result){
+                if (run_calib_stop == false){ 
+                  // if load is too high
+                  stepper.setSpeed(0);
+                  delay(100);
+                  stepper.moveTo((stepper.currentPosition() - (1*steps_per_mm))); // Small step out
+                  run_calib_stop = true;
+                }
+              }  
+          }
+        }else{
+          // interval_stall = 100; // 8 microsteps
+          interval_stall = 40; // 4 microsteps
+        }
+        sg_result_last = sg_result;
+          // If stepper reach the possition
+        if (stepper.distanceToGo() == 0) {
+          // Stop on the max cut height position
+          Serial.println("LOG|Calibration finished.");
+          stepper.setSpeed(0);
+          stepper.disableOutputs();
+          run_calib_up = false;
+          Serial.print("LOG|Max cut height: ");
+          Serial.print(stepper.currentPosition());
+          Serial.print(" / ");
+          Serial.print(steps_per_mm);
+          Serial.print("  =  ");
+          Serial.print(stepper.currentPosition() / steps_per_mm);
+          Serial.println(" mm");
+          max_height = abs(stepper.currentPosition() / steps_per_mm);
+          EEPROM.put(max_height_addr, max_height);
+          run_calib_down = false;
+          run_calib = false;
+        }
+        lastmillisSpeed = millis();
+      } 
+    }
+    // SEND SHORT STATUS MESSAGE (S|status) - R-motor run, W-wait, P-going to position, H-going home, C-calibrating
+    if ((millis() - lastmillis_stepper_report) >= 1000){ 
+      Serial.println("S|C");
+      lastmillis_stepper_report = millis();
+    }
+  }
 }
 
 void prerusenib() {
   countb ++;
-  // char buffer[10];
-  // sprintf(buffer, "c:%d", (int)countb, (int)(countb * 100) % 100);
-  // nh.loginfo(buffer);
 }
 
-// ROS subscribers //
-
-// On/Off motor
-void setMotor( const std_msgs::Int32& set_motor_msg){
-  motor_on = set_motor_msg.data; 
-}
-
-// Set motor rpm
-void setRpm( const std_msgs::Int32& set_rpm_msg){
-  setPoint = (set_rpm_msg.data); 
-  // setPoint = (set_rpm_msg.data*PPR/MS); 
-}
-
-// Set height of the mower blade
-void setHeight( const std_msgs::Int32& set_height_msg){ 
-  stepper.enableOutputs();
-  stepper.moveTo(set_height_msg.data*steps_per_mm);
-}
