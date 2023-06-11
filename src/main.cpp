@@ -6,8 +6,6 @@
 #include <EEPROM.h>
 
 
-
-int  cut_height = 0;
 int height = 0;
 // Stepper
 bool run_calib = false;
@@ -33,7 +31,7 @@ String cmdval = "0000";
 #define PWM_L 6
 int  motor_on = 0;
 int  motor_on_last = 0;
-bool motor_direction = true;  // true=right, false=left
+bool motor_direction = false;  // true=right, false=left
 bool motor_direction_change = false;  // if motor direction change event trigered
 bool motor_direction_change_req = true;  // true=right, false=left motor direction change request
 bool motor_error = 0;
@@ -64,19 +62,21 @@ constexpr uint32_t steps_per_mm = 80*15;     // 4 microsteps
 
 #define OUTPUT_MIN 0
 #define OUTPUT_MAX 255
-#define KP 0.0000005   // 1.7    2.7     0.03
-#define KI 3.0    // 25       5     0.6
-#define KD 0.0000000005  // 0.02     0.02     60   0.000005
-#define KD 0.0000000000005  // 0.02     0.02     60   0.000005
-#define PID_STEP_MS 4
+
+
+#define PID_STEP_MS 25
 #define SPEED_SAMPLES 1
-// double kp = KP;
-// double ki = KI;
-// double kd = KD;
+// kp: 0.000100000011920928 ki: 1.399999980926513671 kd: 0.000000000000000050
+// kp: 0.020000002384185791 ki: 0.090000000000000000 kd: 0.000100000011920928  slibne
+// kp: 0.020000002384185791 ki: 0.060000000000000000 kd: 0.000000000000000000 1^-40
+// kp: 0.080000009536743164 ki: 0.100000000000000000 kd: 0.000000000000000001
+double kp = 0.08;
+double ki = 0.1;
+double kd = 0.000000000000000001;
 
-#define INTERVAL 4.0
+#define INTERVAL 25.0
 
-unsigned long rpm = 60;
+unsigned long rpm = 1600;
 #define PPR 256.0
 #define MS  (60000.0/INTERVAL) // 60 000 - minute in ms
 
@@ -87,6 +87,7 @@ void calibration();
 void go_home();
 void go_position();
 
+
 //////////////////// EEPROM  addr and init check
 int8_t check_eeprom = 0;
 int check_eeprom_addr = 0; 
@@ -95,21 +96,9 @@ int max_height_addr = sizeof(int8_t);
 TMC2130Stepper driver = TMC2130Stepper(EN_PIN, DIR_PIN, STEP_PIN, CS_PIN);
 AccelStepper stepper = AccelStepper(stepper.DRIVER, STEP_PIN, DIR_PIN);
 
-PID myPID(&count, &outputVal, &setPoint, KP, KI, KD, DIRECT);
+PID myPID(&count, &outputVal, &setPoint, kp, ki, kd, DIRECT);
 
 
-
-
-
-/*** 
- * 
- * ToDo:
- * 
- * Vypnout pri zablokovanem motoru. STATUS E-Error
- * Hotovo, ale proverit
- * 
- * 
- ***/
 
 int sg_result;
 int sg_result_last;
@@ -178,7 +167,7 @@ void setup() {
   attachInterrupt(0, prerusenib, RISING);
   lastmillis = millis();
   myPID.SetMode(AUTOMATIC);
-  myPID.SetSampleTime(4);
+  myPID.SetSampleTime(50); // 4
   pinMode(SWITCH_PIN, INPUT);
 
 }
@@ -234,8 +223,8 @@ void loop() {
           Serial.println(int(motor_direction));
           Serial.print("SRPM|");
           Serial.println(int(setPoint));
-        }
 
+        }
 
         // PID MOWER MOTOR
         if ((millis() - lastmillisloop) >= INTERVAL){
@@ -401,6 +390,66 @@ void loop() {
           }
         }
       }
+      // Set PID kp ---
+      if (command == "PIDP"){
+        String str_exp = "00";
+        str_exp[0] = cmdval[2];
+        str_exp[1] = cmdval[3];
+        String str_val = "00";
+        str_val[0] = cmdval[0];
+        str_val[1] = cmdval[1];
+        double dbl_val = str_val.toInt();
+        double dbl_exp = str_exp.toInt();
+        kp = dbl_val * (pow(10, (dbl_exp * -1)));
+        myPID.SetTunings(kp, ki, kd);
+        myPID.SetMode(0); 
+        outputVal=0; 
+        myPID.SetMode(1);
+      }
+      // Set PID kd ---
+      if (command == "PIDI"){
+        String str_exp = "00";
+        str_exp[0] = cmdval[2];
+        str_exp[1] = cmdval[3];
+        String str_val = "00";
+        str_val[0] = cmdval[0];
+        str_val[1] = cmdval[1];
+        double dbl_val = str_val.toInt();
+        double dbl_exp = str_exp.toInt();
+        ki = dbl_val * (pow(10, (dbl_exp * -1)));
+        myPID.SetTunings(kp, ki, kd);
+        myPID.SetMode(0); 
+        outputVal=0; 
+        myPID.SetMode(1);
+      }
+      // Set PID kd ---
+      if (command == "PIDD"){
+        String str_exp = "00";
+        str_exp[0] = cmdval[2];
+        str_exp[1] = cmdval[3];
+        String str_val = "00";
+        str_val[0] = cmdval[0];
+        str_val[1] = cmdval[1];
+        double dbl_val = str_val.toInt();
+        double dbl_exp = str_exp.toInt();
+        kd = dbl_val * (pow(10, (dbl_exp * -1)));
+        myPID.SetTunings(kp, ki, kd);
+        myPID.SetMode(0); 
+        outputVal=0; 
+        myPID.SetMode(1);
+      }
+      // Print PID to log ---
+      if (command == "PRNT"){
+        if (cmdval.toInt() == 1) // Check limit values min/max
+        {
+          Serial.print("LOG|kp: ");
+          Serial.print(kp, 18);
+          Serial.print(" ki: ");
+          Serial.print(ki, 18);
+          Serial.print(" kd: ");
+          Serial.print(kd, 18);
+        }
+      }
       // reinit for new serial data ////////
       pos = 0;
       commandtmp = "";
@@ -467,7 +516,7 @@ void go_home(){
                 stepper.setSpeed(0);
                 Serial.println("LOG|On top position.");
                 delay(100);
-                stepper.moveTo((stepper.currentPosition() - (1*steps_per_mm))); // Small step out
+                stepper.moveTo((stepper.currentPosition() - (2*steps_per_mm))); // Small step out
                 run_calib_stop = true;
               }
             }  
@@ -577,7 +626,7 @@ void calibration(){
                   // if load is too high
                   stepper.setSpeed(0);
                   delay(100);
-                  stepper.moveTo((stepper.currentPosition() - (1*steps_per_mm))); // Small step out
+                  stepper.moveTo((stepper.currentPosition() - (2*steps_per_mm))); // Small step out
                   run_calib_stop = true;
                 }
               }  
@@ -617,7 +666,10 @@ void calibration(){
   }
 }
 
+
+
 void prerusenib() {
   countb ++;
 }
+
 
