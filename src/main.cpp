@@ -4,6 +4,7 @@
 #include <PID_v1.h>
 #include <TMC2130Stepper_REGDEFS.h>
 #include <EEPROM.h>
+#include <PWM.h>  // !!!  Only for Timer1 in safeinit function in ATimerDefs.cpp
 
 
 int height = 0;
@@ -27,8 +28,9 @@ String command = "NONE";
 String cmdval = "0000";
 
 
-#define PWM_R 5
-#define PWM_L 6
+#define PWM_R 10
+#define PWM_L 9
+float frequency = 40000.0f; //frequency (in Hz) for motor PWM
 int  motor_on = 0;
 int  motor_on_last = 0;
 bool motor_direction = false;  // true=right, false=left
@@ -52,8 +54,8 @@ int speedSampleBufferRosCounter = 0;
 
 #define EN_PIN    7  
 #define DIR_PIN   8  
-#define STEP_PIN  9  
-#define CS_PIN    10  
+#define STEP_PIN  5  
+#define CS_PIN    6  
 #define MOSI_PIN  11
 #define MISO_PIN 12
 #define SCK_PIN  13
@@ -163,6 +165,10 @@ void setup() {
   pinMode(PWM_L, OUTPUT);
   analogWrite(PWM_R, 0);
   analogWrite(PWM_L, 0);
+  InitTimersSafe();
+  SetPinFrequencySafe(PWM_R, frequency);
+  SetPinFrequencySafe(PWM_L, frequency);
+
   setPoint = double(rpm); //205-3000rpm 4096
   attachInterrupt(0, prerusenib, RISING);
   lastmillis = millis();
@@ -181,8 +187,10 @@ void loop() {
     goposition = false;
     // mower motor off
     motor_on = false;
-    analogWrite(PWM_L, 0);
-    analogWrite(PWM_R, 0);
+    // analogWrite(PWM_L, 0);
+    // analogWrite(PWM_R, 0);
+    pwmWrite(PWM_L, 0);
+    pwmWrite(PWM_R, 0);
   }else{
     if (gohome){
       go_home();
@@ -191,8 +199,10 @@ void loop() {
       goposition = false;
       // mower motor off
       motor_on = false;
-      analogWrite(PWM_L, 0);
-      analogWrite(PWM_R, 0);
+      // analogWrite(PWM_L, 0);
+      // analogWrite(PWM_R, 0);
+      pwmWrite(PWM_L, 0);
+      pwmWrite(PWM_R, 0);
     }else{
       if (goposition){
         go_position();
@@ -201,8 +211,10 @@ void loop() {
         gohome = false;
         // mower motor off
         motor_on = false;
-        analogWrite(PWM_L, 0);
-        analogWrite(PWM_R, 0);
+        // analogWrite(PWM_L, 0);
+        // analogWrite(PWM_R, 0);
+        pwmWrite(PWM_L, 0);
+        pwmWrite(PWM_R, 0);
       }else{
         // Everything except stepper operations run here.
 
@@ -252,14 +264,18 @@ void loop() {
         if (motor_on){
           myPID.Compute();
           if (motor_direction == 1){
-            analogWrite(PWM_R, int(outputVal));
+            // analogWrite(PWM_R, int(outputVal));
+            pwmWrite(PWM_R, int(outputVal));
           }else{
-            analogWrite(PWM_L, int(outputVal));
+            // analogWrite(PWM_L, int(outputVal));
+            pwmWrite(PWM_L, int(outputVal));
           }  
         }else{
           // myPID.stop();
-          analogWrite(PWM_L, 0);
-          analogWrite(PWM_R, 0);
+          // analogWrite(PWM_L, 0);
+          // analogWrite(PWM_R, 0);
+          pwmWrite(PWM_L, 0);
+          pwmWrite(PWM_R, 0);
           outputVal = 0;
         }
 
@@ -293,8 +309,11 @@ void loop() {
     if (int(outputVal) > 0 && (count + count_last) == 0){
       motor_error = true; 
       motor_on = false;
-      analogWrite(PWM_L, 0);
-      analogWrite(PWM_R, 0);     
+      // analogWrite(PWM_L, 0);
+      // analogWrite(PWM_R, 0);     
+      pwmWrite(PWM_L, 0);
+      pwmWrite(PWM_R, 0);     
+
     }
     count_last = count;
   }
