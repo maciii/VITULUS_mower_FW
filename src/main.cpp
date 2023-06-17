@@ -57,8 +57,8 @@ int speedSampleBufferRosCounter = 0;
 #define MOSI_PIN  11
 #define MISO_PIN 12
 #define SCK_PIN  13
-// constexpr uint32_t steps_per_mm = 80*15*2;  // 8 microsteps
-constexpr uint32_t steps_per_mm = 80*15;     // 4 microsteps
+constexpr uint32_t steps_per_mm = 80*15*2;  // 8 microsteps
+// constexpr uint32_t steps_per_mm = 80*15;     // 4 microsteps
 
 #define OUTPUT_MIN 0
 #define OUTPUT_MAX 255
@@ -104,12 +104,12 @@ int sg_result;
 int sg_result_last;
 int cs_actual;
 unsigned long interval_stall = 200;
-
+int stopStall = 380;
 
 
 bool vsense;
-// #define STALL_VALUE -20 // [-64..63] 8 microsteps
-#define STALL_VALUE -59 // [-64..63] 4 microsteps
+#define STALL_VALUE -64 // [-64..63] 8 microsteps
+// #define STALL_VALUE 0 // [-64..63] 4 microsteps
 
 uint16_t rms_current(uint8_t CS, float Rsense = 0.11) {
   return (float)(CS+1)/32.0 * (vsense?0.180:0.325)/(Rsense+0.02) / 1.41421 * 1000;
@@ -139,7 +139,7 @@ void setup() {
   driver.hysteresis_start(4);
   driver.hysteresis_end(-2);
   driver.rms_current(600); // mA
-  driver.microsteps(4);
+  driver.microsteps(8);
   driver.diag1_stall(1);
   driver.diag1_active_high(1);
   driver.coolstep_min_speed(0xFFFFF); // 20bit max
@@ -169,7 +169,10 @@ void setup() {
   myPID.SetMode(AUTOMATIC);
   myPID.SetSampleTime(50); // 4
   pinMode(SWITCH_PIN, INPUT);
-
+  
+  // Mac - debugovací info - smazat později
+  Serial.print("DRV_STATUS=0b");
+  Serial.println(driver.DRV_STATUS(), BIN);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -496,8 +499,8 @@ void go_home(){
       Serial.println("LOG|Going to home position.");
       stepper.moveTo(100*steps_per_mm); // Move 100mm
       stepper.enableOutputs();
-      // interval_stall = 200;  // 8 microsteps
-      interval_stall = 100;  // 4 microsteps
+      interval_stall = 200;  // 8 microsteps
+      // interval_stall = 100;  // 4 microsteps
       run_calib_stop = false;
     }
     if ((millis() - lastmillisSpeed) >= interval_stall){
@@ -505,11 +508,11 @@ void go_home(){
       uint32_t drv_status = driver.DRV_STATUS();
       sg_result = int((drv_status & SG_RESULT_bm)>>SG_RESULT_bp);
       cs_actual = rms_current((drv_status & CS_ACTUAL_bm)>>CS_ACTUAL_bp);
-      // Serial.print(sg_result);
-      // Serial.print(" ");
-      // Serial.println(cs_actual);
-      if (sg_result <= 0){                         // Fine tune value for stall 
-        if (cs_actual == 1049){
+      Serial.print(sg_result);
+      Serial.print(" ");
+      Serial.println(cs_actual);
+      if (sg_result <= stopStall){                         // Fine tune value for stall 
+        if (cs_actual == 552){
             if (sg_result_last > sg_result){
               if (run_calib_stop == false){ 
                 // if load is too high
@@ -522,8 +525,8 @@ void go_home(){
             }  
         }
       }else{
-        // interval_stall = 100; // 8 microsteps
-        interval_stall = 40; // 4 microsteps
+        interval_stall = 100; // 8 microsteps
+        //interval_stall = 40; // 4 microsteps
       }
       sg_result_last = sg_result;
         // If stepper reach the possition
@@ -553,8 +556,8 @@ void calibration(){
       Serial.println("LOG|Calibration of bottom position started.");
       stepper.moveTo(-100*steps_per_mm); // Move 100mm
       stepper.enableOutputs();
-      // interval_stall = 200;  // 8 microsteps
-      interval_stall = 100;  // 4 microsteps
+      interval_stall = 200;  // 8 microsteps
+      // interval_stall = 100;  // 4 microsteps
       // run_calib_last = false;
       run_calib_stop = false;
       run_calib_up = false;
@@ -569,8 +572,8 @@ void calibration(){
         // Serial.print(sg_result);
         // Serial.print(" ");
         // Serial.println(cs_actual);
-        if (sg_result <= 0){                          // Fine tune value for stall 
-          if (cs_actual == 1049){
+        if (sg_result <= stopStall){                          // Fine tune value for stall 
+          if (cs_actual == 552){
               if (sg_result_last > sg_result){
                 if (run_calib_stop == false){ 
                   // if load is too high
@@ -583,8 +586,8 @@ void calibration(){
               }  
           }
         }else{
-          // interval_stall = 100; // 8 microsteps
-          interval_stall = 50; // 4 microsteps
+          interval_stall = 100; // 8 microsteps
+          // interval_stall = 50; // 4 microsteps
         }
         sg_result_last = sg_result;
           // If stepper reach the possition
@@ -601,8 +604,8 @@ void calibration(){
           stepper.moveTo(100*steps_per_mm); // Move 100mm
           run_calib_up = true;
           run_calib_stop = false;
-          // interval_stall = 200;  // 8 microsteps
-          interval_stall = 100;  // 4 microsteps
+          interval_stall = 200;  // 8 microsteps
+          // interval_stall = 100;  // 4 microsteps
         }
         lastmillisSpeed = millis();
       }
@@ -619,8 +622,8 @@ void calibration(){
         // Serial.print(sg_result);
         // Serial.print(" ");
         // Serial.println(cs_actual);
-        if (sg_result <= 0){                         // Fine tune value for stall 
-          if (cs_actual == 1049){
+        if (sg_result <= stopStall){                         // Fine tune value for stall 
+          if (cs_actual == 552){
               if (sg_result_last > sg_result){
                 if (run_calib_stop == false){ 
                   // if load is too high
@@ -632,8 +635,8 @@ void calibration(){
               }  
           }
         }else{
-          // interval_stall = 100; // 8 microsteps
-          interval_stall = 40; // 4 microsteps
+          interval_stall = 100; // 8 microsteps
+          // interval_stall = 40; // 4 microsteps
         }
         sg_result_last = sg_result;
           // If stepper reach the possition
